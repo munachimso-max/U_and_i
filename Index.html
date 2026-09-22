@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Facecast — live face swap</title>
+<style>
+  :root{
+    --bg: #0c0d0f;
+    --panel: #16181c;
+    --line: #26292f;
+    --text: #e8e9eb;
+    --dim: #8a8f98;
+    --tally: #ff3b30;
+    --ok: #2fd97a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .mono { font-family: "SF Mono", "Cascadia Code", Consolas, monospace; }
+
+  .rig {
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--line);
+  }
+  .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--dim);
+    transition: background .2s, box-shadow .2s;
+  }
+  .dot.live {
+    background: var(--tally);
+    box-shadow: 0 0 10px 2px rgba(255,59,48,.6);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: .2px;
+    margin: 0;
+  }
+  header .status {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--dim);
+  }
+
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 1px;
+    background: var(--line);
+  }
+  @media (max-width: 860px) {
+    main { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    background: var(--bg);
+    padding: 20px;
+  }
+
+  .field {
+    margin-bottom: 22px;
+  }
+  .field label {
+    display: block;
+    font-size: 12px;
+    color: var(--dim);
+    margin-bottom: 8px;
+  }
+
+  .drop {
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .15s;
+    position: relative;
+    overflow: hidden;
+  }
+  .drop:hover { border-color: var(--dim); }
+  .drop input { position:absolute; inset:0; opacity:0; cursor:pointer; }
+  .drop .hint { font-size: 12px; color: var(--dim); }
+  .drop img {
+    display: block;
+    max-width: 100%;
+    max-height: 140px;
+    margin: 0 auto 8px;
+    border-radius: 4px;
+  }
+
+  button {
+    width: 100%;
+    padding: 12px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s, opacity .15s;
+  }
+  button:hover:not(:disabled) { background: #1d2026; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: var(--tally); border-color: var(--tally); }
+  button.primary:hover:not(:disabled) { background: #e6362d; }
+
+  .readout {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--dim);
+    line-height: 1.7;
+  }
+  .readout span { color: var(--text); }
+
+  .stage {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    min-height: 360px;
+  }
+  video { display: none; }
+  canvas#output {
+    max-width: 100%;
+    max-height: 78vh;
+    width: 100%;
+    display: block;
+  }
+  .stage .empty {
+    position: absolute;
+    color: var(--dim);
+    font-size: 13px;
+    text-align: center;
+    max-width: 280px;
+  }
+  .stage .badge {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(0,0,0,.55);
+    padding: 5px 10px 5px 8px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .5px;
+  }
+</style>
+</head>
+<body>
+<div class="rig">
+  <header>
+    <div class="dot" id="liveDot"></div>
+    <h1>Facecast</h1>
+    <div class="status mono" id="status">idle</div>
+  </header>
+
+  <main>
+    <div class="panel">
+      <div class="field">
+        <label>Face to wear</label>
+        <div class="drop" id="dropZone">
+          <img id="preview" style="display:none">
+          <div class="hint" id="dropHint">Click to upload a photo<br>with one clear, front-facing face</div>
+          <input type="file" id="fileInput" accept="image/*">
+        </div>
+      </div>
+
+      <div class="field">
+        <button class="primary" id="startBtn" disabled>Start camera</button>
+      </div>
+      <div class="field">
+        <button id="stopBtn" disabled>Stop</button>
+      </div>
+
+      <div class="readout mono">
+        models: <span id="mStatus">loading…</span><br>
+        source face: <span id="fStatus">none</span><br>
+        camera face: <span id="cStatus">—</span>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="empty" id="emptyMsg">Upload a photo, then start the camera. Your detected face gets replaced with the uploaded one, frame by frame, right in the browser.</div>
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="output"></canvas>
+      <div class="badge" id="liveBadge" style="display:none">
+        <div class="dot live" style="width:7px;height:7px"></div> LIVE
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+<script>
+const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model';
+
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const preview = document.getElementById('preview');
+const dropHint = document.getElementById('dropHint');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const mStatus = document.getElementById('mStatus');
+const fStatus = document.getElementById('fStatus');
+const cStatus = document.getElementById('cStatus');
+const statusEl = document.getElementById('status');
+const liveDot = document.getElementById('liveDot');
+const liveBadge = document.getElementById('liveBadge');
+const emptyMsg = document.getElementById('emptyMsg');
+
+const video = document.getElementById('video');
+const output = document.getElementById('output');
+const ctx = output.getContext('2d');
+
+let sourceFaceCanvas = null;   // cropped, upright face image to paste in
+let sourceEyeDist = 0;         // pixel distance between eyes in that crop
+let sourceCropCenter = null;   // where, within the crop, the eye-midpoint sits
+let stream = null;
+let rafId = null;
+let modelsReady = false;
+
+async function loadModels() {
+  await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+  await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+  modelsReady = true;
+  mStatus.textContent = 'ready';
+  maybeEnableStart();
+}
+loadModels().catch(err => {
+  mStatus.textContent = 'failed to load';
+  console.error(err);
+});
+
+function maybeEnableStart() {
+  startBtn.disabled = !(modelsReady && sourceFaceCanvas);
+}
+
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  preview.src = url;
+  preview.style.display = 'block';
+  dropHint.style.display = 'none';
+
+  fStatus.textContent = 'detecting…';
+  const img = await faceapi.bufferToImage(file);
+  const det = await faceapi
+    .detectSingleFace(img, new faceapi.TinyFaceDetectorOptions())
+    .withFaceLandmarks();
+
+  if (!det) {
+    fStatus.textContent = 'no face found — try another photo';
+    sourceFaceCanvas = null;
+    maybeEnableStart();
+    return;
+  }
+
+  buildSourceCrop(img, det.landmarks);
+  fStatus.textContent = 'locked';
+  maybeEnableStart();
+});
+
+function eyeCenters(landmarks) {
+  const pts = landmarks.positions;
+  const leftEye = landmarks.getLeftEye();
+  const rightEye = landmarks.getRightEye();
+  const avg = (arr) => ({
+    x: arr.reduce((s,p)=>s+p.x,0)/arr.length,
+    y: arr.reduce((s,p)=>s+p.y,0)/arr.length
+  });
+  return { left: avg(leftEye), right: avg(rightEye) };
+}
+
+function buildSourceCrop(img, landmarks) {
+  const box = landmarks.detection ? landmarks.detection.box : landmarks._detection.box;
+  const pad = box.width * 0.6;
+  const sx = Math.max(0, box.x - pad);
+  const sy = Math.max(0, box.y - pad * 1.1);
+  const sw = Math.min(img.width - sx, box.width + pad * 2);
+  const sh = Math.min(img.height - sy, box.height + pad * 2.2);
+
+  const c = document.createElement('canvas');
+  c.width = sw; c.height = sh;
+  const cctx = c.getContext('2d');
+  cctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+
+  const { left, right } = eyeCenters(landmarks);
+  const cropLeft = { x: left.x - sx, y: left.y - sy };
+  const cropRight = { x: right.x - sx, y: right.y - sy };
+
+  sourceEyeDist = Math.hypot(cropRight.x - cropLeft.x, cropRight.y - cropLeft.y);
+  sourceCropCenter = {
+    x: (cropLeft.x + cropRight.x) / 2,
+    y: (cropLeft.y + cropRight.y) / 2,
+    angle: Math.atan2(cropRight.y - cropLeft.y, cropRight.x - cropLeft.x)
+  };
+  sourceFaceCanvas = c;
+}
+
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+  } catch (err) {
+    statusEl.textContent = 'camera denied';
+    return;
+  }
+  video.srcObject = stream;
+  await video.play();
+  output.width = video.videoWidth;
+  output.height = video.videoHeight;
+
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  liveDot.classList.add('live');
+  liveBadge.style.display = 'flex';
+  emptyMsg.style.display = 'none';
+  statusEl.textContent = 'streaming';
+  loop();
+}
+
+function stopCamera() {
+  if (rafId) cancelAnimationFrame(rafId);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null;
+  liveDot.classList.remove('live');
+  liveBadge.style.display = 'none';
+  emptyMsg.style.display = 'block';
+  startBtn.disabled = !(modelsReady && sourceFaceCanvas);
+  stopBtn.disabled = true;
+  statusEl.textContent = 'idle';
+  cStatus.textContent = '—';
+  ctx.clearRect(0, 0, output.width, output.height);
+}
+
+async function loop() {
+  if (!stream) return;
+  ctx.drawImage(video, 0, 0, output.width, output.height);
+
+  const det = await faceapi
+    .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
+    .withFaceLandmarks();
+
+  if (det && sourceFaceCanvas) {
+    cStatus.textContent = 'tracking';
+    pasteFace(det.landmarks);
+  } else {
+    cStatus.textContent = det ? 'tracking' : 'searching…';
+  }
+
+  rafId = requestAnimationFrame(loop);
+}
+
+function pasteFace(landmarks) {
+  const { left, right } = eyeCenters(landmarks);
+  const targetCenter = { x: (left.x + right.x) / 2, y: (left.y + right.y) / 2 };
+  const targetEyeDist = Math.hypot(right.x - left.x, right.y - left.y);
+  const targetAngle = Math.atan2(right.y - left.y, right.x - left.x);
+
+  const scale = targetEyeDist / sourceEyeDist;
+  const rotation = targetAngle - sourceCropCenter.angle;
+
+  ctx.save();
+  // soft-edged mask so the pasted face blends into the live frame
+  const maskW = sourceFaceCanvas.width * scale;
+  const maskH = sourceFaceCanvas.height * scale;
+  const grad = ctx.createRadialGradient(
+    targetCenter.x, targetCenter.y, Math.min(maskW, maskH) * 0.22,
+    targetCenter.x, targetCenter.y, Math.max(maskW, maskH) * 0.52
+  );
+  grad.addColorStop(0, 'rgba(0,0,0,1)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = output.width;
+  maskCanvas.height = output.height;
+  const mctx = maskCanvas.getContext('2d');
+  mctx.translate(targetCenter.x, targetCenter.y);
+  mctx.rotate(rotation);
+  mctx.scale(scale, scale);
+  mctx.drawImage(sourceFaceCanvas, -sourceCropCenter.x, -sourceCropCenter.y);
+  mctx.globalCompositeOperation = 'destination-in';
+  mctx.setTransform(1, 0, 0, 1, 0, 0);
+  mctx.fillStyle = grad;
+  mctx.fillRect(0, 0, output.width, output.height);
+
+  ctx.drawImage(maskCanvas, 0, 0);
+  ctx.restore();
+}
+</script>
+</body>
+      </html>
+      
